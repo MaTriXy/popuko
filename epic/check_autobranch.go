@@ -5,27 +5,64 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/google/go-github/github"
+	"github.com/google/go-github/v28/github"
 	"github.com/voyagegroup/popuko/operation"
 	"github.com/voyagegroup/popuko/queue"
 	"github.com/voyagegroup/popuko/setting"
 )
 
-func CheckAutoBranch(ctx context.Context, client *github.Client, autoMergeRepo *queue.AutoMergeQRepo, ev *github.StatusEvent) {
+type StateChangeInfo struct {
+	Status                    string
+	Owner                     string
+	Name                      string
+	DefaultBranch             string
+	NotHandle                 bool
+	ID                        int64
+	SHA                       string
+	IsRelatedToAutoBranchBody func(string) bool
+}
+
+func CheckAutoBranchWithStatusEvent(ctx context.Context, client *github.Client, autoMergeRepo *queue.AutoMergeQRepo, ev *github.StatusEvent) {
+	info := StateChangeInfo{
+		Status:                    *ev.State,
+		Owner:                     *ev.Repo.Owner.Login,
+		Name:                      *ev.Repo.Name,
+		DefaultBranch:             ev.Repo.GetDefaultBranch(),
+		NotHandle:                 *ev.State == "pending",
+		ID:                        *ev.ID,
+		SHA:                       *ev.SHA,
+		IsRelatedToAutoBranchBody: isRelatedToAutoBranchBodyWithStatusEvent(ev),
+	}
+	checkAutoBranch(ctx, client, autoMergeRepo, info)
+}
+
+func CheckAutoBranchWithCheckSuiteEvent(ctx context.Context, client *github.Client, autoMergeRepo *queue.AutoMergeQRepo, ev *github.CheckSuiteEvent) {
+	info := StateChangeInfo{
+		Status:                    *ev.CheckSuite.Conclusion,
+		Owner:                     *ev.Repo.Owner.Login,
+		Name:                      *ev.Repo.Name,
+		DefaultBranch:             ev.Repo.GetDefaultBranch(),
+		NotHandle:                 *ev.CheckSuite.Status != "completed",
+		ID:                        *ev.CheckSuite.ID,
+		SHA:                       *ev.CheckSuite.HeadSHA,
+		IsRelatedToAutoBranchBody: isRelatedToAutoBranchBodyWithCheckSuiteEvent(ev),
+	}
+	checkAutoBranch(ctx, client, autoMergeRepo, info)
+}
+
+func checkAutoBranch(ctx context.Context, client *github.Client, autoMergeRepo *queue.AutoMergeQRepo, info StateChangeInfo) {
 	log.Println("info: Start: checkAutoBranch")
 	defer log.Println("info: End: checkAutoBranch")
 
-	if *ev.State == "pending" {
-		log.Println("info: Not handle pending status event")
+	if info.NotHandle {
+		log.Printf("info: Not handle %v in this event\n", info.Status)
 		return
 	}
-	log.Printf("info: Start to handle status event: %v\n", *ev.State)
+	log.Printf("info: Start to handle in this event: %v\n", info.Status)
 
-	repoOwner := *ev.Repo.Owner.Login
-	repoName := *ev.Repo.Name
-	log.Printf("info: Target repository is %v/%v\n", repoOwner, repoName)
+	log.Printf("info: Target repository is %v/%v\n", info.Owner, info.Name)
 
-	repoInfo := GetRepositoryInfo(ctx, client.Repositories, repoOwner, repoName)
+	repoInfo := GetRepositoryInfo(ctx, client.Repositories, info.Owner, info.Name, info.DefaultBranch)
 	if repoInfo == nil {
 		log.Println("debug: cannot get repositoryInfo")
 		return
@@ -39,7 +76,7 @@ func CheckAutoBranch(ctx context.Context, client *github.Client, autoMergeRepo *
 	}
 	log.Println("info: Start to handle auto merging the branch.")
 
-	qHandle := autoMergeRepo.Get(repoOwner, repoName)
+	qHandle := autoMergeRepo.Get(info.Owner, info.Name)
 	if qHandle == nil {
 		log.Println("error: cannot get the queue handle")
 		return
@@ -62,29 +99,44 @@ func CheckAutoBranch(ctx context.Context, client *github.Client, autoMergeRepo *
 	}
 	log.Println("info: got the active item.")
 
-	if !isRelatedToAutoBranch(active, ev, repoInfo.AutoBranchName) {
-		log.Printf("info: The event's tip sha does not equal to the one which is tesing actively in %v/%v\n", repoOwner, repoName)
+	if !isRelatedToAutoBranch(active, info, repoInfo.AutoBranchName) {
+		log.Printf("info: The event's tip sha does not equal to the one which is tesing actively in %v/%v\n", info.Owner, info.Name)
 		return
 	}
 	log.Println("info: the status event is related to auto branch.")
 
-	mergeSucceedItem(ctx, client, repoOwner, repoName, repoInfo, q, ev)
+	mergeSucceedItem(ctx, client, info.Owner, info.Name, repoInfo, q, info)
 
 	q.RemoveActive()
 	q.Save()
 
-	tryNextItem(ctx, client, repoOwner, repoName, q, repoInfo.AutoBranchName)
+	tryNextItem(ctx, client, info.Owner, info.Name, q, repoInfo.AutoBranchName)
 
 	log.Println("info: complete to start the next trying")
 }
 
-func isRelatedToAutoBranch(active *queue.AutoMergeQueueItem, ev *github.StatusEvent, autoBranch string) bool {
-	if !operation.IsIncludeAutoBranch(ev.Branches, autoBranch) {
-		log.Printf("warn: this status event (%v) does not include the auto branch\n", *ev.ID)
+func isRelatedToAutoBranchBodyWithStatusEvent(ev *github.StatusEvent) func(string) bool {
+	return func(autoBranch string) bool {
+		return operation.IsIncludeAutoBranch(ev.Branches, autoBranch)
+	}
+}
+
+func isRelatedToAutoBranchBodyWithCheckSuiteEvent(ev *github.CheckSuiteEvent) func(string) bool {
+	return func(autoBranch string) bool {
+		if ev.CheckSuite.HeadBranch == nil {
+			return false
+		}
+		return *ev.CheckSuite.HeadBranch == autoBranch
+	}
+}
+
+func isRelatedToAutoBranch(active *queue.AutoMergeQueueItem, info StateChangeInfo, autoBranch string) bool {
+	if !info.IsRelatedToAutoBranchBody(autoBranch) {
+		log.Printf("warn: this event (%v) is not the auto branch\n", info.ID)
 		return false
 	}
 
-	if ok := checkCommitHashOnTrying(active, ev); !ok {
+	if ok := checkCommitHashOnTrying(active, info); !ok {
 		return false
 	}
 
@@ -92,14 +144,14 @@ func isRelatedToAutoBranch(active *queue.AutoMergeQueueItem, ev *github.StatusEv
 	return true
 }
 
-func checkCommitHashOnTrying(active *queue.AutoMergeQueueItem, ev *github.StatusEvent) bool {
+func checkCommitHashOnTrying(active *queue.AutoMergeQueueItem, info StateChangeInfo) bool {
 	autoTipSha := active.AutoBranchHead
 	if autoTipSha == nil {
 		return false
 	}
 
-	if *autoTipSha != *ev.SHA {
-		log.Printf("debug: The commit hash which contained by the status event: %v\n", *ev.SHA)
+	if *autoTipSha != info.SHA {
+		log.Printf("debug: The commit hash which contained by the event: %v\n", info.SHA)
 		log.Printf("debug: The commit hash is pinned to the status queue as the tip of auto branch: %v\n", autoTipSha)
 		return false
 	}
@@ -114,7 +166,7 @@ func mergeSucceedItem(
 	name string,
 	repoInfo *setting.RepositoryInfo,
 	q *queue.AutoMergeQueue,
-	ev *github.StatusEvent) bool {
+	info StateChangeInfo) bool {
 
 	active := q.GetActive()
 
@@ -131,10 +183,10 @@ func mergeSucceedItem(
 		return true
 	}
 
-	if *ev.State != "success" {
+	if info.Status != "success" {
 		log.Println("info: could not merge pull request")
 
-		comment := ":collision: The result of what tried to merge this pull request is `" + *ev.State + "`."
+		comment := ":collision: The result of what tried to merge this pull request is `" + info.Status + "`."
 		commentStatus(ctx, client, owner, name, prNum, comment, repoInfo.AutoBranchName)
 
 		currentLabels := operation.GetLabelsByIssue(ctx, client.Issues, owner, name, prNum)
@@ -151,7 +203,7 @@ func mergeSucceedItem(
 		return false
 	}
 
-	comment := ":tada: The result of what tried to merge this pull request is `" + *ev.State + "`."
+	comment := ":tada: The result of what tried to merge this pull request is `" + info.Status + "`."
 	commentStatus(ctx, client, owner, name, prNum, comment, repoInfo.AutoBranchName)
 
 	if ok := operation.MergePullRequest(ctx, client, owner, name, prInfo, active.PrHead); !ok {
@@ -208,7 +260,7 @@ func tryNextItem(ctx context.Context, client *github.Client, owner, name string,
 
 	nextNum := next.PullRequest
 
-	ok, commit := operation.TryWithMaster(ctx, client, owner, name, nextInfo, autoBranch)
+	ok, commit := operation.TryWithDefaultBranch(ctx, client, owner, name, nextInfo, autoBranch)
 	if !ok {
 		log.Printf("info: we cannot try #%v with the latest `master`.", nextNum)
 		return tryNextItem(ctx, client, owner, name, q, autoBranch)

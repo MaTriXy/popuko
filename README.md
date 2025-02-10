@@ -1,6 +1,6 @@
 # popuko
 
-[![Build Status (master)](https://travis-ci.org/voyagegroup/popuko.svg?branch=master)](https://travis-ci.org/voyagegroup/popuko)
+[![CI Status](https://github.com/voyagegroup/popuko/workflows/CI/badge.svg)](https://github.com/voyagegroup/popuko/actions?query=workflow%3ACI)
 
 ## What is this?
 
@@ -36,7 +36,7 @@ Not for other projects.
 And, to use without host homu by yourself, you can use `homu.io` or other similar service (e.g. [bors.tech][bors.tech]).
 But it's shared by other third repositories. It would not suite to use it for your internal repository.
 
-Some features (e.g. assigning reviewers to the pull request) are provided by [highfilve][highfive], not by homu.
+Some features (e.g. assigning reviewers to the pull request) are provided by [highfive][highfive], not by homu.
 Thus you also have to setup it to use their features which are used in code review frequently.
 
 And furthermore, homu's reviewer configuration need to configure the central configuration file.
@@ -61,7 +61,7 @@ These features are inspired by [homu][homu] and [highfive][highfive].
 - __Patrol pull requests which cannot merge into it after the upstream has been updated__
     - This bot patrols automatically by hooking GitHub's push events.
     - Change the label for the unmergeable pull request and comment about it.
-- __Try the pull request with the latest `master` branch, and merge into it automatically__
+- __Try the pull request with the latest default branch, and merge into it automatically__
     - We call this feature as "Auto-Merging".
 - __Specify a reviewer by a file committed to the repository__
     - This feature is not implemented by homu.
@@ -116,13 +116,10 @@ Auto-Merging behaves like this:
 
 ### Build & Launch the Application
 
-0. This requires that [`github.com/golang/dep`](https://github.com/golang/dep) has been installed.
 1. Build from the source.
     - Run these steps:
-        1. `make bootstrap`.
-        2. `make build` or `make build_linux_x64`.
+        1. `make build` or `make build_linux_x64`.
     - Run `make help` to see more details.
-    - You also can do `go get`.
 2. Create the config directory.
     - By default, this app uses `$XDG_CONFIG_HOME/popuko/` as the config dir.
       (If you don't set `$XDG_CONFIG_HOME` environment variable, this use `~/.config/popuko/`.)
@@ -143,7 +140,8 @@ Auto-Merging behaves like this:
 3. Set `http://<your_server_with_port>/github` for the webhook to your repository with these events:
     - `Issue comment`
     - `Push`
-    - `Status` (required to use Auto-Merging feature).
+    - `Status` (required to use Auto-Merging feature (non GitHub App CI services)).
+    - `Check Suite` (required to use Auto-Merging feature (GitHub App CI Services)).
     - `Pull Request` (required to remove all status (`S-` prefixed) labels after a pull request is closed).
 4. Create these labels to make the status visible.
     - `S-awaiting-review`
@@ -178,8 +176,6 @@ Auto-Merging behaves like this:
 
 ### The current limitations
 
-- The default branch of your repository should be named as `master`.
-    - [TODO: #196](https://github.com/voyagegroup/popuko/issues/196).
 - If your pull request which try to be merged into non-default branch, this bot does not detect the conflict
   even if the upstream has been changed.
     - [TODO: #197](https://github.com/voyagegroup/popuko/issues/197)
@@ -222,7 +218,7 @@ And then we thought it's more better as an internal toolchain to implement a mer
 
 ## License
 
-[The MIT License](./LICENSE.txt)
+[The MIT License](./LICENSE.MIT)
 
 
 ## How to Contribute

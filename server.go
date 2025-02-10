@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/google/go-github/github"
+	"github.com/google/go-github/v28/github"
 	"golang.org/x/oauth2"
 
 	"github.com/voyagegroup/popuko/epic"
@@ -74,6 +75,10 @@ func (srv *AppServer) handleGithubHook(rw http.ResponseWriter, req *http.Request
 		srv.processStatusEvent(ctx, event)
 		rw.WriteHeader(http.StatusOK)
 		return
+	case *github.CheckSuiteEvent:
+		srv.processCheckSuiteEvent(ctx, event)
+		rw.WriteHeader(http.StatusOK)
+		return
 	case *github.PullRequestEvent:
 		srv.processPullRequestEvent(ctx, event)
 		rw.WriteHeader(http.StatusOK)
@@ -113,7 +118,8 @@ func (srv *AppServer) processIssueCommentEvent(ctx context.Context, ev *github.I
 		return false, fmt.Errorf("error: unexpected result of parsing comment body")
 	}
 
-	repoInfo := epic.GetRepositoryInfo(ctx, srv.githubClient.Repositories, repoOwner, repo)
+	defaultBranchName := ev.Repo.GetDefaultBranch()
+	repoInfo := epic.GetRepositoryInfo(ctx, srv.githubClient.Repositories, repoOwner, repo, defaultBranchName)
 	if repoInfo == nil {
 		return false, fmt.Errorf("debug: cannot get repositoryInfo")
 	}
@@ -189,7 +195,24 @@ func (srv *AppServer) processStatusEvent(ctx context.Context, ev *github.StatusE
 		return
 	}
 
-	epic.CheckAutoBranch(ctx, srv.githubClient, srv.autoMergeRepo, ev)
+	epic.CheckAutoBranchWithStatusEvent(ctx, srv.githubClient, srv.autoMergeRepo, ev)
+}
+
+func (srv *AppServer) processCheckSuiteEvent(ctx context.Context, ev *github.CheckSuiteEvent) {
+	log.Println("info: Start: processCheckSuiteEvent")
+	defer log.Println("info: End: processCheckSuiteEvent")
+
+	repoOwner := *ev.Repo.Owner.Login
+	log.Printf("debug: repository owner is %v\n", repoOwner)
+	repo := *ev.Repo.Name
+	log.Printf("debug: repository name is %v\n", repo)
+	if !srv.setting.AcceptRepo(repoOwner, repo) {
+		n := repoOwner + "/" + repo
+		log.Printf("======= error: =======\n This event is from an unaccepted repository: %v\n==============", n)
+		return
+	}
+
+	epic.CheckAutoBranchWithCheckSuiteEvent(ctx, srv.githubClient, srv.autoMergeRepo, ev)
 }
 
 func (srv *AppServer) processPullRequestEvent(ctx context.Context, ev *github.PullRequestEvent) {
@@ -216,15 +239,23 @@ func (srv *AppServer) processPullRequestEvent(ctx context.Context, ev *github.Pu
 	epic.RemoveAllStatusLabel(ctx, srv.githubClient, repo, pr)
 }
 
-func createGithubClient(config *setting.Settings) *github.Client {
+func createGithubClient(config *setting.Settings) (*github.Client, error) {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{
 			AccessToken: config.GithubToken(),
 		},
 	)
 	tc := oauth2.NewClient(oauth2.NoContext, ts)
-	client := github.NewClient(tc)
-	return client
+
+	if config.Github.BaseURL == "" {
+		client := github.NewClient(tc)
+		return client, nil
+	} else {
+		if config.Github.UploadURL == "" {
+			return nil, errors.New("upload_url is blank. If use enterprise, set config base_url and upload_url.")
+		}
+		return github.NewEnterpriseClient(config.Github.BaseURL, config.Github.UploadURL, tc)
+	}
 }
 
 const prefixRestAPI = "/api/v0"
